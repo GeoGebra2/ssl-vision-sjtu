@@ -185,6 +185,8 @@ protected:
   double _center_marker_area_stddev;
   double _center_marker_uniform;
   double _center_marker_duplicate_distance;
+  double _center_marker_circularity_min;
+  int    _detection_persistence_frames;
   int    _other_markers_max_detections;
   double _other_markers_max_query_distance;
 
@@ -238,6 +240,18 @@ public:
     void findRobotsByTeamMarkerOnly(::google::protobuf::RepeatedPtrField< ::SSL_DetectionRobot >* robots, int team_color_id, const Image<raw8> * image, CMVision::ColorRegionList * colorlist);
 
     void update(::google::protobuf::RepeatedPtrField< ::SSL_DetectionRobot >* robots, int team_color_id, int max_robots, const Image<raw8> * image, CMVision::ColorRegionList * colorlist, CMVision::RegionTree & reg_tree);
+    // persistence cache for temporal smoothing
+    struct PersistedRobot {
+      double x;
+      double y;
+      double pixel_x;
+      double pixel_y;
+      int id;
+      double orientation;
+      double conf;
+      int missed;
+    };
+    std::vector<PersistedRobot> _persisted;
 };
 
 }

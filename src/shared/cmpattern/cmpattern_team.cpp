@@ -75,6 +75,8 @@ RobotPattern::RobotPattern(VarList * team_root)
       _center_marker_max_height = _center_marker_filter->findChildOrReplace(new VarInt("Max Height (pixels)",30));
       _center_marker_min_area = _center_marker_filter->findChildOrReplace(new VarInt("Min Area (sq-pixels)",15));
       _center_marker_max_area = _center_marker_filter->findChildOrReplace(new VarInt("Max Area (sq-pixels)",400));
+      _center_marker_min_circularity = _center_marker_filter->findChildOrReplace(new VarDouble("Min Circularity",0.60,0.0,1.0));
+      _detection_persistence_frames = _center_marker_filter->findChildOrReplace(new VarInt("Detection Persistence Frames",2));
       _center_marker_duplicate_distance = _center_marker_filter->findChildOrReplace(new VarInt("Duplicate Merge Distance (mm)",135));
 
     _other_markers_filter = _settings->findChildOrReplace(new VarList("Other Markers Settings"));

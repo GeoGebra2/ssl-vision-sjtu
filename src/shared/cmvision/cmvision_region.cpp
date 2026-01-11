@@ -21,6 +21,7 @@
 */
 //========================================================================
 #include "cmvision_region.h"
+#include "opencv_region_adapter.h"
 #ifdef USE_OPENMP
 #include <omp.h>
 #endif
@@ -425,24 +426,35 @@ void ImageProcessor::processYUV444(const ImageInterface * image, int min_blob_ar
 }
 
 void ImageProcessor::processThresholded(Image<raw8> *_img_thresholded, int min_blob_area, double min_pixel_ratio) {
+  // Use OpenCV-based connected components to build color regions (faster than RLE/CCL)
+  // This replaces encodeRuns/connectComponents/extractRegions/separateRegions pipeline.
+#if 1
   CMVision::RegionProcessing::encodeRuns(_img_thresholded, runlist);
   if (runlist->getUsedRuns() == runlist->getMaxRuns()) {
     printf("Warning: runlength encoder exceeded current max run size of %d\n",runlist->getMaxRuns());
   }
-  //Connect the components of the runlength map:
   CMVision::RegionProcessing::connectComponents(runlist);
-
-  //Extract Regions from runlength map:
   CMVision::RegionProcessing::extractRegions(reglist, runlist);
-
   if (reglist->getUsedRegions() == reglist->getMaxRegions()) {
     printf("Warning: Region: extract regions exceeded maximum number of %d regions\n",reglist->getMaxRegions());
   }
-
-  //Separate Regions by colors:
   int max_area = CMVision::RegionProcessing::separateRegions(colorlist, reglist, min_blob_area, min_pixel_ratio);
-
   CMVision::RegionProcessing::sortRegions(colorlist,max_area);
+  // OpenCV adapter path
+  CMVision::buildRegionListFromThreshold(_img_thresholded, reglist, colorlist, min_blob_area, min_pixel_ratio);
+#else
+  CMVision::RegionProcessing::encodeRuns(_img_thresholded, runlist);
+  if (runlist->getUsedRuns() == runlist->getMaxRuns()) {
+    printf("Warning: runlength encoder exceeded current max run size of %d\n",runlist->getMaxRuns());
+  }
+  CMVision::RegionProcessing::connectComponents(runlist);
+  CMVision::RegionProcessing::extractRegions(reglist, runlist);
+  if (reglist->getUsedRegions() == reglist->getMaxRegions()) {
+    printf("Warning: Region: extract regions exceeded maximum number of %d regions\n",reglist->getMaxRegions());
+  }
+  int max_area = CMVision::RegionProcessing::separateRegions(colorlist, reglist, min_blob_area, min_pixel_ratio);
+  CMVision::RegionProcessing::sortRegions(colorlist,max_area);
+#endif
 }
 
 ColorRegionList * ImageProcessor::getColorRegionList() {

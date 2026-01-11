@@ -20,6 +20,7 @@
 */
 //========================================================================
 #include "cmpattern_teamdetector.h"
+#include <opencv2/opencv.hpp>
 
 namespace CMPattern {
 
@@ -111,6 +112,8 @@ void TeamDetector::init(RobotPattern * robotPattern, Team * team)
   _center_marker_area_mean=_robotPattern->_center_marker_area_mean->getDouble();
   _center_marker_area_stddev=_robotPattern->_center_marker_area_stddev->getDouble();
   _center_marker_uniform=_robotPattern->_center_marker_uniform->getDouble();
+  _center_marker_circularity_min = _robotPattern->_center_marker_min_circularity->getDouble();
+  _detection_persistence_frames = _robotPattern->_detection_persistence_frames->getInt();
   _center_marker_duplicate_distance=_robotPattern->_center_marker_duplicate_distance->getDouble();
 
   _other_markers_max_detections=_robotPattern->_other_markers_max_detections->getInt();
@@ -197,6 +200,12 @@ void TeamDetector::update(::google::protobuf::RepeatedPtrField< ::SSL_DetectionR
 
 void TeamDetector::findRobotsByTeamMarkerOnly(::google::protobuf::RepeatedPtrField< ::SSL_DetectionRobot >* robots, int team_color_id, const Image<raw8> * image, CMVision::ColorRegionList * colorlist)
 {
+  // refresh per-frame params from GUI so changes take effect immediately
+  if (_robotPattern) {
+    _center_marker_circularity_min = _robotPattern->_center_marker_min_circularity->getDouble();
+    _detection_persistence_frames = _robotPattern->_detection_persistence_frames->getInt();
+  }
+
   filter_team.init( colorlist->getRegionList(team_color_id).getInitialElement() );
 
   //TODO: change these to update on demand:
@@ -212,6 +221,52 @@ void TeamDetector::findRobotsByTeamMarkerOnly(::google::protobuf::RepeatedPtrFie
     //TODO: add confidence masking:
     //float conf = det.mask.get(reg->cen_x,reg->cen_y);
     double conf=1.0;
+    // QUICK CIRCULARITY + WORLD-AREA CHECK (reject obvious non-round small blobs)
+    // Use OpenCV to compute contour perimeter on the thresholded image for this region
+    {
+      const int x1 = reg->x1;
+      const int y1 = reg->y1;
+      const int w = reg->width();
+      const int h = reg->height();
+      if (w > 0 && h > 0 && image != nullptr) {
+        cv::Mat full(image->getHeight(), image->getWidth(), CV_8UC1, (void*)image->getData());
+        // ensure ROI inside image
+        int rx = std::max(0, x1);
+        int ry = std::max(0, y1);
+        int rw = std::min(full.cols - rx, w);
+        int rh = std::min(full.rows - ry, h);
+        if (rw > 2 && rh > 2) {
+          cv::Mat roi = full(cv::Rect(rx, ry, rw, rh));
+          cv::Mat bin;
+          cv::compare(roi, (uchar)team_color_id, bin, cv::CMP_EQ);
+          std::vector<std::vector<cv::Point>> contours;
+          cv::findContours(bin, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+          if (!contours.empty()) {
+            // select largest contour by area (more robust than taking first)
+            double best_area = 0.0;
+            int best_idx = 0;
+            for (size_t ci = 0; ci < contours.size(); ++ci) {
+              double a = fabs(cv::contourArea(contours[ci]));
+              if (a > best_area) { best_area = a; best_idx = (int)ci; }
+            }
+            // skip circularity check for extremely small contours (too noisy)
+            int min_area_pixels = (_robotPattern ? _robotPattern->_center_marker_min_area->getInt() : 0);
+            if (best_area < (double)std::max(3, min_area_pixels/4)) {
+              // too small to compute reliable circularity
+            } else {
+              double perim = cv::arcLength(contours[best_idx], true);
+              double circ = 0.0;
+              if (perim > 1e-6) circ = (4.0 * M_PI * best_area) / (perim * perim + 1e-9);
+              if (circ < _center_marker_circularity_min) {
+                // debug log for circularity rejections
+                // printf("Circularity reject: circ=%0.3f thresh=%0.3f area_px=%0.1f at (%0.1f,%0.1f)\n", circ, _center_marker_circularity_min, best_area, reg->cen_x, reg->cen_y);
+                continue;
+              }
+            }
+          }
+        }
+      }
+    }
     if (field_filter.isInFieldOrPlayableBoundary(reg_center) &&  ((_histogram_enable==false) || checkHistogram(reg,image)==true)) {
       double area = getRegionArea(reg,_robot_height);
       double area_err = fabs(area - _center_marker_area_mean);
@@ -245,7 +300,8 @@ void TeamDetector::findRobotsByTeamMarkerOnly(::google::protobuf::RepeatedPtrFie
   for(int i=0; i<size; i++){
     for(int j=i+1; j<size; j++){
       if(sqdist(vector2d(robots->Get(i).x(),robots->Get(i).y()),vector2d(robots->Get(j).x(),robots->Get(j).y())) < sq(_center_marker_duplicate_distance)) {
-        robots->Mutable(i)->set_confidence(0.0);
+        // keep the earlier (higher-confidence) entry, drop the later one
+        robots->Mutable(j)->set_confidence(0.0);
       }
     }
   }
@@ -256,6 +312,69 @@ void TeamDetector::findRobotsByTeamMarkerOnly(::google::protobuf::RepeatedPtrFie
   //remove extra items:
   while(robots->size() > _max_robots) {
     robots->RemoveLast();
+  }
+
+  // --- temporal persistence: merge with previously seen robots to reduce flicker ---
+  // For each persisted robot not matched, if missed < persistence_frames, re-insert with decayed confidence.
+  for (auto it = _persisted.begin(); it != _persisted.end(); ) {
+    bool matched = false;
+    int size = robots->size();
+    for (int i=0;i<size;i++) {
+      double dx = robots->Get(i).x() - it->x;
+      double dy = robots->Get(i).y() - it->y;
+      double dist2 = dx*dx + dy*dy;
+      if (dist2 < sq(_center_marker_duplicate_distance)) {
+        // match found: update persisted entry
+        it->x = robots->Get(i).x();
+        it->y = robots->Get(i).y();
+        it->pixel_x = robots->Get(i).pixel_x();
+        it->pixel_y = robots->Get(i).pixel_y();
+            it->conf = robots->Get(i).confidence();
+            it->id = robots->Get(i).robot_id();
+            it->orientation = robots->Get(i).has_orientation() ? robots->Get(i).orientation() : 0.0;
+        it->missed = 0;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      it->missed++;
+      if (it->missed <= _detection_persistence_frames) {
+        // re-insert as low-confidence detection (decay confidence by factor)
+          double decayed_conf = it->conf * 0.75; // less aggressive decay
+          SSL_DetectionRobot * r = addRobot(robots, decayed_conf, _max_robots*2);
+          if (r) {
+            r->set_x(it->x);
+            r->set_y(it->y);
+            r->set_pixel_x(it->pixel_x);
+            r->set_pixel_y(it->pixel_y);
+                  r->set_confidence(decayed_conf);
+                  r->set_robot_id(it->id);
+                  if (_have_angle) r->set_orientation(it->orientation);
+            // printf("Persisted re-insert: x=%0.1f y=%0.1f decayed_conf=%0.3f missed=%d persist_frames=%d\n", it->x, it->y, decayed_conf, it->missed, _detection_persistence_frames);
+          }
+      }
+    }
+    if (it->missed > _detection_persistence_frames) {
+      it = _persisted.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  // Refresh persisted list from current robots
+  _persisted.clear();
+  for (int i=0;i<robots->size();i++) {
+    PersistedRobot p;
+    p.x = robots->Get(i).x();
+    p.y = robots->Get(i).y();
+    p.pixel_x = robots->Get(i).pixel_x();
+    p.pixel_y = robots->Get(i).pixel_y();
+    p.conf = robots->Get(i).confidence();
+    p.id = robots->Get(i).robot_id();
+        p.orientation = robots->Get(i).has_orientation() ? robots->Get(i).orientation() : 0.0;
+    p.missed = 0;
+    _persisted.push_back(p);
   }
 
 }
@@ -416,7 +535,12 @@ void TeamDetector::stripRobots(::google::protobuf::RepeatedPtrField< ::SSL_Detec
 void TeamDetector::findRobotsByModel(::google::protobuf::RepeatedPtrField< ::SSL_DetectionRobot >* robots, int team_color_id, const Image<raw8> * image, CMVision::ColorRegionList * colorlist, CMVision::RegionTree & reg_tree)
 {
 
-  (void)image;
+  // refresh per-frame params from GUI so changes take effect immediately
+  if (_robotPattern) {
+    _center_marker_circularity_min = _robotPattern->_center_marker_min_circularity->getDouble();
+    _detection_persistence_frames = _robotPattern->_detection_persistence_frames->getInt();
+  }
+
   const int MaxDetections = _other_markers_max_detections;
   Marker cen; // center marker
   Marker *markers = new Marker[MaxDetections];
@@ -440,6 +564,53 @@ void TeamDetector::findRobotsByModel(::google::protobuf::RepeatedPtrField< ::SSL
     //TODO add masking:
     //if(det.mask.get(reg->cen_x,reg->cen_y) >= 0.5){
     if (field_filter.isInFieldOrPlayableBoundary(reg_center)) {
+      // QUICK CIRCULARITY + WORLD-AREA CHECK (reject obvious non-round small blobs)
+      // Use OpenCV to compute contour perimeter on the thresholded image for this region
+      {
+        const int x1 = reg->x1;
+        const int y1 = reg->y1;
+        const int w = reg->width();
+        const int h = reg->height();
+        if (w > 0 && h > 0 && image != nullptr) {
+          cv::Mat full(image->getHeight(), image->getWidth(), CV_8UC1, (void*)image->getData());
+          // ensure ROI inside image
+          int rx = std::max(0, x1);
+          int ry = std::max(0, y1);
+          int rw = std::min(full.cols - rx, w);
+          int rh = std::min(full.rows - ry, h);
+          if (rw > 2 && rh > 2) {
+            cv::Mat roi = full(cv::Rect(rx, ry, rw, rh));
+            cv::Mat bin;
+            cv::compare(roi, (uchar)team_color_id, bin, cv::CMP_EQ);
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(bin, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+            if (!contours.empty()) {
+              // select largest contour by area (more robust than taking first)
+              double best_area = 0.0;
+              int best_idx = 0;
+              for (size_t ci = 0; ci < contours.size(); ++ci) {
+                double a = fabs(cv::contourArea(contours[ci]));
+                if (a > best_area) { best_area = a; best_idx = (int)ci; }
+              }
+              // skip circularity check for extremely small contours (too noisy)
+              int min_area_pixels = (_robotPattern ? _robotPattern->_center_marker_min_area->getInt() : 0);
+              if (best_area < (double)std::max(3, min_area_pixels/4)) {
+                // too small to compute reliable circularity
+              } else {
+                double perim = cv::arcLength(contours[best_idx], true);
+                double circ = 0.0;
+                if (perim > 1e-6) circ = (4.0 * M_PI * best_area) / (perim * perim + 1e-9);
+                if (circ < _center_marker_circularity_min) {
+                  // debug log for circularity rejections
+                  // printf("Circularity reject: circ=%0.3f thresh=%0.3f area_px=%0.1f at (%0.1f,%0.1f)\n", circ, _center_marker_circularity_min, best_area, reg->cen_x, reg->cen_y);
+                  continue;
+                }
+              }
+            }
+          }
+        }
+      }
+
       cen.set(reg,reg_center3d,getRegionArea(reg,_robot_height));
       int num_markers = 0;
 
@@ -471,15 +642,6 @@ void TeamDetector::findRobotsByModel(::google::protobuf::RepeatedPtrField< ::SSL
       if(num_markers >= 2){
         CMPattern::PatternProcessing::sortMarkersByAngle(markers,num_markers);
         for(int i=0; i<num_markers; i++){
-          /*DEBUG CODE:
-          char colorchar='?';
-          if (markers[i].id==color_id_green) colorchar='g';
-          if (markers[i].id==color_id_pink) colorchar='p';
-          if (markers[i].id==color_id_white) colorchar='w';
-          if (markers[i].id==color_id_team) colorchar='t';
-          if (markers[i].id==color_id_field_green) colorchar='f';
-          if (markers[i].id==color_id_cyan) colorchar='c';
-          printf("%c ",colorchar);*/
           int j = (i + 1) % num_markers;
           markers[i].next_dist = dist(markers[i].loc,markers[j].loc);
           markers[i].next_angle_dist = angle_pos(angle_diff(markers[i].angle,markers[j].angle));
@@ -501,12 +663,86 @@ void TeamDetector::findRobotsByModel(::google::protobuf::RepeatedPtrField< ::SSL
       }
     }
   }
+  // remove duplicates ... keep the ones with higher confidence:
+  int size=robots->size();
+  for(int i=0; i<size; i++){
+    for(int j=i+1; j<size; j++){
+      if(sqdist(vector2d(robots->Get(i).x(),robots->Get(i).y()),vector2d(robots->Get(j).x(),robots->Get(j).y())) < sq(_center_marker_duplicate_distance)) {
+        // keep the earlier (higher-confidence) entry, drop the later one
+        robots->Mutable(j)->set_confidence(0.0);
+      }
+    }
+  }
+
   //remove items with 0-confidence:
   stripRobots(robots);
 
   //remove extra items:
   while(robots->size() > _max_robots) {
     robots->RemoveLast();
+  }
+
+  // --- temporal persistence: merge with previously seen robots to reduce flicker ---
+  // For each persisted robot not matched, if missed < persistence_frames, re-insert with decayed confidence.
+  for (auto it = _persisted.begin(); it != _persisted.end(); ) {
+    bool matched = false;
+    int size = robots->size();
+    for (int i=0;i<size;i++) {
+      double dx = robots->Get(i).x() - it->x;
+      double dy = robots->Get(i).y() - it->y;
+      double dist2 = dx*dx + dy*dy;
+      if (dist2 < sq(_center_marker_duplicate_distance)) {
+        // match found: update persisted entry
+        it->x = robots->Get(i).x();
+        it->y = robots->Get(i).y();
+        it->pixel_x = robots->Get(i).pixel_x();
+        it->pixel_y = robots->Get(i).pixel_y();
+          it->conf = robots->Get(i).confidence();
+          it->id = robots->Get(i).robot_id();
+          it->orientation = robots->Get(i).has_orientation() ? robots->Get(i).orientation() : 0.0;
+        it->missed = 0;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      it->missed++;
+      if (it->missed <= _detection_persistence_frames) {
+        // re-insert as low-confidence detection (decay confidence by factor)
+          double decayed_conf = it->conf * 0.75; // less aggressive decay
+          SSL_DetectionRobot * r = addRobot(robots, decayed_conf, _max_robots*2);
+          if (r) {
+            r->set_x(it->x);
+            r->set_y(it->y);
+            r->set_pixel_x(it->pixel_x);
+            r->set_pixel_y(it->pixel_y);
+            r->set_confidence(decayed_conf);
+              r->set_robot_id(it->id);
+              if (_have_angle) r->set_orientation(it->orientation);
+            // printf("Persisted re-insert: x=%0.1f y=%0.1f decayed_conf=%0.3f missed=%d persist_frames=%d\n", it->x, it->y, decayed_conf, it->missed, _detection_persistence_frames);
+          }
+      }
+    }
+    if (it->missed > _detection_persistence_frames) {
+      it = _persisted.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  // Refresh persisted list from current robots
+  _persisted.clear();
+  for (int i=0;i<robots->size();i++) {
+    PersistedRobot p;
+    p.x = robots->Get(i).x();
+    p.y = robots->Get(i).y();
+    p.pixel_x = robots->Get(i).pixel_x();
+    p.pixel_y = robots->Get(i).pixel_y();
+    p.conf = robots->Get(i).confidence();
+    p.id = robots->Get(i).robot_id();
+    p.orientation = robots->Get(i).has_orientation() ? robots->Get(i).orientation() : 0.0;
+    p.missed = 0;
+    _persisted.push_back(p);
   }
 
   delete[] markers;

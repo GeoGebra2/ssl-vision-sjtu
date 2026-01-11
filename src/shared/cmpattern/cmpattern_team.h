@@ -83,6 +83,8 @@ protected:
       VarInt * _center_marker_max_height;
       VarInt * _center_marker_min_area;
       VarInt * _center_marker_max_area;
+      VarDouble * _center_marker_min_circularity;
+      VarInt * _detection_persistence_frames;
       VarInt * _center_marker_duplicate_distance;
 
     VarList * _other_markers_filter;

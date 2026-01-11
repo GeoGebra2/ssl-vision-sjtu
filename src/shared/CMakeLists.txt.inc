@@ -25,6 +25,7 @@ set (SHARED_SRCS
 	${shared_dir}/cmvision/cmvision_histogram.cpp
 	${shared_dir}/cmvision/cmvision_region.cpp
 	${shared_dir}/cmvision/cmvision_threshold.cpp
+	${shared_dir}/cmvision/opencv_region_adapter.cpp
 
 	${shared_dir}/gl/glcamera.cpp
 	${shared_dir}/gl/globject.cpp
