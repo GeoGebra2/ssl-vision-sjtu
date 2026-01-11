@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<VarXML>
+	<Var name="ZJUNlict" type="list">
+		<Var name="Team Name" type="string">
+			ZJUNlict
+		</Var>
+		<Var name="Robot Height (mm)" type="double" minval="" maxval="">
+			140.000000
+		</Var>
+	</Var>
+</VarXML>
