@@ -19,6 +19,7 @@
 */
 //========================================================================
 #include "plugin_colorthreshold.h"
+#include <thread>
 
 static void thresholdImage(RawImage *imagePartIn, Image<raw8> *imagePartOut, YUVLUT * lut, const ImageInterface* mask = nullptr) {
   if (imagePartIn->getColorFormat() == COLOR_YUV422_UYVY) {
@@ -107,6 +108,11 @@ PluginColorThreshold::PluginColorThreshold(FrameBuffer * _buffer, YUVLUT * _lut,
   settings=new VarList("Color Threshold");
   numThreads = new VarInt("number of threads", 0, 0, 32);
   settings->addChild(numThreads);
+  unsigned int hwc = std::thread::hardware_concurrency();
+  if (hwc == 0) hwc = 1;
+  int defaultThreads = hwc > 32 ? 32 : (int)hwc;
+  numThreads->setDefault(defaultThreads);
+  numThreads->setInt(defaultThreads);
 }
 
 
@@ -137,10 +143,17 @@ ProcessResult PluginColorThreshold::process(FrameData * data, RenderOptions * op
   //make sure image is allocated:
   img_thresholded->allocate(data->video.getWidth(),data->video.getHeight());
 
-  if((int) workers.size() != numThreads->getInt()) {
+  int desiredThreads = numThreads->getInt();
+  if (desiredThreads == 0) {
+    unsigned int hwc = std::thread::hardware_concurrency();
+    if (hwc == 0) hwc = 1;
+    desiredThreads = hwc > 32 ? 32 : (int)hwc;
+  }
+
+  if((int) workers.size() != desiredThreads) {
     clearWorkers();
-    for(int i=0;i<numThreads->getInt();i++) {
-      auto *worker = new PluginColorThresholdWorker(i, numThreads->getInt(), lut);
+    for(int i=0;i<desiredThreads;i++) {
+      auto *worker = new PluginColorThresholdWorker(i, desiredThreads, lut);
       workers.push_back(worker);
     }
   }

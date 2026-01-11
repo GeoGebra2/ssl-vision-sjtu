@@ -11,6 +11,20 @@ set(USE_FLYCAP FALSE CACHE BOOL "Compile with flycap driver (FLIR cameras, prede
 set(USE_V4L TRUE CACHE BOOL "Compile with Video4Linux support (generic webcams)")
 set(USE_SPLITTER FALSE CACHE BOOL "Compile with Camera splitter support (virtual cameras with part of a full image)")
 
+option(USE_OPENMP "Enable OpenMP parallelization" ON)
+
+if(USE_OPENMP)
+	find_package(OpenMP)
+	if(OpenMP_CXX_FOUND)
+		message(STATUS "OpenMP found")
+		set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+		add_definitions(-DUSE_OPENMP)
+	else()
+		message(WARNING "OpenMP requested but not found on this system")
+	endif()
+endif()
+
 if(USE_DC1394 AND USE_mvIMPACT)
 	message(FATAL_ERROR "DC1394 and mvImpact are not compatible: mvImpact crashes when creating device manager")
 endif()

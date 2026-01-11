@@ -19,6 +19,10 @@
 */
 //========================================================================
 #include "plugin_find_blobs.h"
+#ifdef USE_OPENCV_BLOBS
+#include <opencv2/imgproc.hpp>
+#include <opencv2/core.hpp>
+#endif
 
 PluginFindBlobs::PluginFindBlobs(FrameBuffer * _buffer, YUVLUT * _lut)
  : VisionPlugin(_buffer)
@@ -67,6 +71,73 @@ ProcessResult PluginFindBlobs::process(FrameData * data, RenderOptions * options
   }
 
   if (_v_enable->getBool()) {
+#ifdef USE_OPENCV_BLOBS
+    // Fast OpenCV connected components per color channel (bypass runlength path)
+    Image<raw8> * img_thresholded = (Image<raw8> *) data->map.get("cmv_threshold");
+    if (img_thresholded != nullptr) {
+      int width = img_thresholded->getWidth();
+      int height = img_thresholded->getHeight();
+      raw8 * pixels = img_thresholded->getPixelData();
+
+      CMVision::Region * reg = reglist->getRegionArrayPointer();
+      CMVision::RegionLinkedList * color = colorlist->getColorRegionArrayPointer();
+      int max_reg = reglist->getMaxRegions();
+      int num_colors = colorlist->getNumColorRegions();
+
+      // clear color lists
+      for (int i=0;i<num_colors;i++) color[i].reset();
+
+      int n = 0;
+      int global_max_area = 0;
+
+      for (int c=0;c<num_colors;c++) {
+        // build binary image for this color
+        cv::Mat bin(height, width, CV_8UC1);
+        const int total = width * height;
+        for (int i=0;i<total;i++) bin.data[i] = (pixels[i] & (1u<<c)) ? 255 : 0;
+
+        cv::Mat labels, stats, centroids;
+        int num_labels = cv::connectedComponentsWithStats(bin, labels, stats, centroids, 8, CV_32S);
+
+        for (int lbl=1; lbl<num_labels; lbl++) {
+          int area = stats.at<int>(lbl, cv::CC_STAT_AREA);
+          if (area < _v_min_blob_area->getInt()) continue;
+
+          int left = stats.at<int>(lbl, cv::CC_STAT_LEFT);
+          int top = stats.at<int>(lbl, cv::CC_STAT_TOP);
+          int w = stats.at<int>(lbl, cv::CC_STAT_WIDTH);
+          int h = stats.at<int>(lbl, cv::CC_STAT_HEIGHT);
+
+          if (n >= max_reg) {
+            reglist->setUsedRegions(max_reg);
+            goto finish_opencv_blobs;
+          }
+
+          reg[n].color.v = (uint8_t)c;
+          reg[n].area = area;
+          reg[n].x1 = left;
+          reg[n].y1 = top;
+          reg[n].x2 = left + w - 1;
+          reg[n].y2 = top + h - 1;
+          reg[n].cen_x = (float)centroids.at<double>(lbl,0);
+          reg[n].cen_y = (float)centroids.at<double>(lbl,1);
+          reg[n].run_start = 0;
+          reg[n].iterator_id = 0;
+          reg[n].next = 0;
+
+          // insert into color list
+          color[c].insertFront(&reg[n]);
+          if (area > global_max_area) global_max_area = area;
+          n++;
+        }
+      }
+finish_opencv_blobs:
+      reglist->setUsedRegions(n);
+      CMVision::RegionProcessing::sortRegions(colorlist, global_max_area);
+      return ProcessingOk;
+    }
+#endif
+
     //Connect the components of the runlength map:
     CMVision::RegionProcessing::connectComponents(runlist);
 

@@ -23,6 +23,9 @@
 #ifdef __AVX2__
 #include <x86intrin.h>
 #endif
+#ifdef USE_OPENMP
+#include <omp.h>
+#endif
 
 CMVisionThreshold::CMVisionThreshold()
 {
@@ -40,7 +43,20 @@ bool CMVisionThreshold::thresholdImageYUV422_UYVY(Image<raw8> * target, const Ra
     return false;
   }
 
-  register lut_mask_t * LUT = lut->getTable();
+
+  // copy LUT to local buffer to avoid holding global lock during processing
+  int lut_size = (int)lut->LUT_SIZE;
+  std::vector<lut_mask_t> localLUT(lut_size);
+  lut->lock();
+  memcpy(localLUT.data(), lut->getTable(), lut_size * sizeof(lut_mask_t));
+  // read shifts while locked
+  int X_SHIFT=lut->X_SHIFT;
+  int Y_SHIFT=lut->Y_SHIFT;
+  int Z_SHIFT=lut->Z_SHIFT;
+  int Z_AND_Y_BITS=lut->Z_AND_Y_BITS;
+  int Z_BITS = lut->Z_BITS;
+  lut->unlock();
+  register lut_mask_t * LUT = localLUT.data();
 
   register unsigned int          target_size    = target->getNumPixels();
   register uyvy *       source_pointer = (uyvy*)(source->getData());
@@ -52,21 +68,17 @@ bool CMVisionThreshold::thresholdImageYUV422_UYVY(Image<raw8> * target, const Ra
     return false;
   }
 
-  lut->lock();
-  int X_SHIFT=lut->X_SHIFT;
-  int Y_SHIFT=lut->Y_SHIFT;
-  int Z_SHIFT=lut->Z_SHIFT;
-  int Z_AND_Y_BITS=lut->Z_AND_Y_BITS;
-  int Z_BITS = lut->Z_BITS;
   uyvy p;
-  for (unsigned int i=0;i<target_size;i+=2) {
-    p=source_pointer[(i >> 0x01)];
+#ifdef USE_OPENMP
+#pragma omp parallel for schedule(static) private(p)
+#endif
+  for (int i=0;i<(int)target_size;i+=2) {
+    p=source_pointer[(i >> 1)];
     register int B=((p.u >> Y_SHIFT) << Z_BITS);
     register int C=(p.v >> Z_SHIFT);
     target_pointer[i] =  mask_pointer[i] & LUT[(((p.y1 >> X_SHIFT) << Z_AND_Y_BITS) | B | C)];
     target_pointer[i+1] =  mask_pointer[i+1] & LUT[(((p.y2 >> X_SHIFT) << Z_AND_Y_BITS) | B | C)];
   }
-  lut->unlock();
   return true;
 }
 
@@ -76,7 +88,18 @@ bool CMVisionThreshold::thresholdImageYUV444(Image<raw8> * target, const ImageIn
     return false;
   }
 
-  register lut_mask_t * LUT = lut->getTable();
+  // copy LUT to local buffer to avoid holding global lock during processing
+  int lut_size = (int)lut->LUT_SIZE;
+  std::vector<lut_mask_t> localLUT(lut_size);
+  lut->lock();
+  memcpy(localLUT.data(), lut->getTable(), lut_size * sizeof(lut_mask_t));
+  int X_SHIFT=lut->X_SHIFT;
+  int Y_SHIFT=lut->Y_SHIFT;
+  int Z_SHIFT=lut->Z_SHIFT;
+  int Z_AND_Y_BITS=lut->Z_AND_Y_BITS;
+  int Z_BITS = lut->Z_BITS;
+  lut->unlock();
+  register lut_mask_t * LUT = localLUT.data();
 
   register unsigned int          target_size    = target->getNumPixels();
   register yuv  *                source_pointer = (yuv*)(source->getData());
@@ -88,18 +111,15 @@ bool CMVisionThreshold::thresholdImageYUV444(Image<raw8> * target, const ImageIn
     return false;
   }
 
-  lut->lock();
-  int X_SHIFT=lut->X_SHIFT;
-  int Y_SHIFT=lut->Y_SHIFT;
-  int Z_SHIFT=lut->Z_SHIFT;
-  int Z_AND_Y_BITS=lut->Z_AND_Y_BITS;
-  int Z_BITS = lut->Z_BITS;
+  
   yuv p;
-  for (unsigned int i=0;i<target_size;i++) {
+#ifdef USE_OPENMP
+#pragma omp parallel for schedule(static) private(p)
+#endif
+  for (int i=0;i<(int)target_size;i++) {
     p=source_pointer[i];
     target_pointer[i] =  mask_pointer[i] & LUT[(((p.y >> X_SHIFT) << Z_AND_Y_BITS) | ((p.u >> Y_SHIFT) << Z_BITS) | (p.v >> Z_SHIFT))];
   }
-  lut->unlock();
 
   return true;
 }
@@ -112,7 +132,11 @@ bool CMVisionThreshold::thresholdImageRGB(Image<raw8> * target, const ImageInter
     return false;
   }
 
-  register lut_mask_t * LUT = lut->getTable();
+  // copy LUT to local buffer to avoid holding global lock during processing
+  int lut_size_rgb = (int)lut->LUT_SIZE;
+  std::vector<lut_mask_t> localLUT_rgb(lut_size_rgb);
+  lut->lock();
+  memcpy(localLUT_rgb.data(), lut->getTable(), lut_size_rgb * sizeof(lut_mask_t));
   int source_size    = source->getNumPixels();
   const rgb * source_pointer = (const rgb*)(source->getData());
   auto * target_pointer = (uint8_t*) target->getPixelData();
@@ -128,6 +152,8 @@ bool CMVisionThreshold::thresholdImageRGB(Image<raw8> * target, const ImageInter
   int Z_SHIFT=lut->Z_SHIFT;
   int Z_AND_Y_BITS=lut->Z_AND_Y_BITS;
   int Z_BITS = lut->Z_BITS;
+  lut->unlock();
+  register lut_mask_t * LUT = localLUT_rgb.data();
 
 #ifdef __AVX2__
   // unpacking from: https://docs.google.com/presentation/d/1I0-SiHid1hTsv7tjLST2dYW5YF5AJVfs9l4Rg9rvz48/edit#slide=id.g1eefe20b_0_125

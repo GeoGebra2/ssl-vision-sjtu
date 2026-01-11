@@ -21,6 +21,9 @@
 */
 //========================================================================
 #include "cmvision_region.h"
+#ifdef USE_OPENMP
+#include <omp.h>
+#endif
 
 namespace CMVision {
 
@@ -263,6 +266,9 @@ int RegionProcessing::separateRegions(CMVision::ColorRegionList * colorlist, CMV
   CMVision::RegionLinkedList * color=colorlist->getColorRegionArrayPointer();
 
   // clear out the region list head table
+  #ifdef USE_OPENMP
+  #pragma omp parallel for schedule(static)
+  #endif
   for(i=0; i<num_colors; i++){
     color[i].reset();
   }
@@ -358,6 +364,9 @@ void RegionProcessing::sortRegions(CMVision::ColorRegionList * colors,int max_ar
   int num_colors=colors->getNumColorRegions();
   CMVision::RegionLinkedList * color = colors->getColorRegionArrayPointer();
   // sort each list
+  #ifdef USE_OPENMP
+  #pragma omp parallel for schedule(dynamic)
+  #endif
   for(i=0; i<num_colors; i++){
     color[i].setFront(sortRegionListByArea(color[i].getInitialElement(),p));
   }
