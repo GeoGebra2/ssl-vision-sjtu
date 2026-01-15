@@ -129,6 +129,7 @@ ProcessResult PluginDetectRobots::process(FrameData * data, RenderOptions * opti
       detection_frame->clear_robots_blue();
       robotlist=detection_frame->mutable_robots_blue();
       detector=team_detector_blue;
+      std::cout<<"blue team: "; //debug msg
     } else {
       color_id=color_id_yellow;
       team=global_team_selector_yellow->getSelectedTeam();
@@ -136,6 +137,7 @@ ProcessResult PluginDetectRobots::process(FrameData * data, RenderOptions * opti
       detection_frame->clear_robots_yellow();
       robotlist=detection_frame->mutable_robots_yellow();
       detector=team_detector_yellow;
+      std::cout<<"yellow team: "; //debug msg
     }
     if (team!=0) {
       if (need_reinit) {
